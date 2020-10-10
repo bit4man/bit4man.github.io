@@ -1,0 +1,57 @@
+---
+layout: post
+title:  "oVirt/RHV - upgrade from 4.3 to 4.4"
+date:   2020-10-10 12:00:00 -0400
+categories: ovirt rhv review
+---
+The [ovirt](https://www.ovirt.org) project is the upstream project for [RHV (Red Hat Virtualization)](https://www.redhat.com/en/technologies/virtualization/enterprise-virtualization) formerly known as RHEV (Red Hat Enterprise Virtualization).
+
+oVirt (and from here on, I will not differentiate between the two names) is a powerful virtualization platform based on libvirt/kvm with a web-front-end that makes managing virtual machines easy across multiple hosts, managing storage, networking, security and a lot more. I've used oVirt for almost 7 years, and the backend virtualization libvirt/qemu/kvm for longer to run isolated tests of software as part of development efforts or setting up a demo/proof of concept for a customer.
+
+oVirt was not an easy platform for an Open Source zealist like me - it started out as a Windows based platform (the management console was Windows only)  
+
+# Architecture
+  The installation has grown from a RHV 2.x installation into the above architecture. Earlier this year (during lockdown) I added additional nodes to handle a large new workload (OpenShift 4) however, the base architecture has been unchanged for years.
+
+![Architecture](/assets/images/rhv-architecture.jpg)
+
+## External dependencies
+  [FreeIPA](https://www.freeipa.org) (ipa and ipa2) provide Kerberos, DNS and I added DHCP to one of the servers too. Every system once installed are added to FreeIPA to manage security, certificates (certmonger) and DNS. Every system service running is using a signed cert based on FreeIPA's cert-monger, so the central CA is present on every system. This means setting up access with SSH is all handled my FreeIPA configuration. This is why there are two FreeIPA servers - without them, everything comes to a halt.
+
+[Gluster](https://www.gluster.org) provides backend storage for oVirt. There are two main volumes - rhv4vol and rhvquick - one is based on old spinning drives, the other on SSDs - both currently provide around 600GB of capacity - this can be increased as not all available capacity is allocated to gluster.  In oVirt two storage domains are created - one for each of these volumes.  Note, NFS is also provided on these servers (not using gluster though) for old ISO and Export domains.  I'm still hoping for the day where uploading a new ISO is as easy as it is to upload a VM image.
+
+[Red Hat Satellite](https://www.redhat.com/en/technologies/management/satellite) is the offline/local repostiroy for everything Linux. That includes kickstart configurations. Satellite also has a compute configuration that points to oVirt so it can manage/create/delete VMs in oVirt. This is only one of many other platform integrations in play - I don't show them all, but it includes AWX (Tower), Ansible Engine, OpenShift installer ingrations, Terraform and more.  Since I come across many different customer scenarios I end up with several solutions that seem to overlap to emulate/test a particular configuration.
+
+oVirt 4.3 has 5 hypervisor nodes. All bare metal - but very different hardware. The three E300 nodes (rhvnode3,rhvnode4,rhvnode5) are all the same, but the two old hypervisors are small ITX motherboards with 4 core Intel CPUs - one Broadcom and one Skylake.  Calvin and Dogbert both has 32GB of RAM each. The three E300 boxes each have 16 cores and 256GB of RAM. The three E300 are in the ocpcluster and the other two are in the oVirt_Cluster.
+
+By core I count hyperthreads too. Nonthing runs needing full power so "sharing" is good enough.
+
+Each hypervisor is installed using the oVirt Hypervisor image. This means they're ostree based and technicdally should only be managed by ovirt - I'll explain in this post how I do installation and this statement isn't entirely true in my case. All of the hypervisors are "headless". Meaning no keyboard or monitor access - at least not easily. The E300 have LOM so you can manage them remotely, and the old ITX boxes were installed on a bench before moved into their final location. 
+
+All servers above are registered with Satellite and FreeIPA.
+
+This architecture runs about 10 permanent VMs and 20-30 VMs on demand depending on the scenario I run. At full allocation things are hard to get to fit. Even with KSM turned on, additional capacity would help now and then.
+
+## Preparing to upgrade
+
+oVirt 4.3 is no longer being maintained except for CVE patches. This means any platform who wants to have active support for integration, like OpenShift, is required to use version 4.4 in order to get support and patches applied if/when issues are found. This is the boat I was on - OpenShift 4.5/4.6 both have active integrations into oVirt and support has been limited to 4.4.2 and above. My 4.3 cluster that's been running since the fall of 2019 no longer was a supported target.
+
+I did test and with the nighly releases of OCP 4.6 the installation failed (network on the provisioned VMs never worked correctly).
+
+The "upgrade" process is [documented](https://access.redhat.com/documentation/en-us/red_hat_virtualization/4.4/html-single/upgrade_guide/index) by Red Hat but the process boils down to the following: Reinstall and hopefully you can establish some functionality from backup. This is because RHV 4.4 moved to RHEL 8.2 from using RHEL 7.6+ in the older releases. 
+
+On all my work-stations I run [Fedora](https://fedoraproject.org) - I've used Fedora since the early 10s - before then I ran RHL and for a while as Red Hat moved to the enterprise model, I used several other distributions until I found Fedora was reliable enough that I could use it for my primary workstation. Since around Fedora 14 that's been my primary platform. It's what boots on all "monitor based computers" when they're turned on in the morning.  When I need to experiment/test setups I typically setup a VM using the local libvirt. I mention Fedora because we used to have a rule that said "you can try to do a live update, but a reinstall is better and more reliable". I've had plenty of Fedora 17/18 upgrades totally kill a system and without knowing details about the boot process you would lose your system that you were live-upgrading.  This is where one of the best named projects were introduced - "[fedup](https://fedoraproject.org/wiki/FedUp)" - from a pure naming perspective I wish this was still around. It changed the upgrade system from pure chance to almost entirely reliable.  Today, fedup was been replaced by the DNF plugin "system-upgrade" but the process mirrors that of fedup:
+
+[Full instructions](https://docs.fedoraproject.org/en-US/quick-docs/dnf-system-upgrade/)
+
+1. Upgrade to the latest minor release on your existing version (dnf --refresh update -y)
+2. Install (if it doesn't exist) system-upgrade (dnf instlal dnf-plugin-system-upgrade)
+3. dnf system-upgrade download --refresh --releasever=##
+where ## is the version of Fedora you want to upgrade to. I've used this in the past using a number MUCH higher than the current release - it doesn't just have to be the next release.
+4. dnf system-upgrade reboot
+
+Sit back, enjoy your coffee as the system performs an offline upgrade. More information about the [system-upgrade process here](https://dnf-plugins-extras.readthedocs.io/en/latest/system-upgrade.html).
+
+My workstations have a lot of 3rd party software on them. From RPMFUSION to repositories from Microsoft and others that all offer yum repos compatible with Fedora. And since around Fedora 26 it's been a breeze to upgrade. Very few issues if any - and those left are relatively easy to solve. There's no longer any headaches and caution - the Fedora community has created a very reliable and useful tool. I applaud them for it - and it stands in STARK contrast to what the oVirt/RHEL8 upgrade looks like.
+
+And that's regardless of the fact, that dispite the marking number the core system is the same between the two platforms. Yes, systemd, cgroups and a lot more have had serious upgrades but nothing that makes starting all over required. Fedora has proven that's not the case. And any RPM can include scripts that activate to customize/change configurations as part of an upgrade. We can make it up to each maintainer to ensure what they maintain safely upgrade between versions.
