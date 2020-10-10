@@ -45,7 +45,7 @@ On all my work-stations I run [Fedora](https://fedoraproject.org) - I've used Fe
 [Full instructions](https://docs.fedoraproject.org/en-US/quick-docs/dnf-system-upgrade/)
 
 1. Upgrade to the latest minor release on your existing version (dnf --refresh update -y)
-2. Install (if it doesn't exist) system-upgrade (dnf instlal dnf-plugin-system-upgrade)
+2. Install (if it doesn't exist) system-upgrade (dnf install dnf-plugin-system-upgrade)
 3. dnf system-upgrade download --refresh --releasever=##
 where ## is the version of Fedora you want to upgrade to. I've used this in the past using a number MUCH higher than the current release - it doesn't just have to be the next release.
 4. dnf system-upgrade reboot
@@ -55,3 +55,255 @@ Sit back, enjoy your coffee as the system performs an offline upgrade. More info
 My workstations have a lot of 3rd party software on them. From RPMFUSION to repositories from Microsoft and others that all offer yum repos compatible with Fedora. And since around Fedora 26 it's been a breeze to upgrade. Very few issues if any - and those left are relatively easy to solve. There's no longer any headaches and caution - the Fedora community has created a very reliable and useful tool. I applaud them for it - and it stands in STARK contrast to what the oVirt/RHEL8 upgrade looks like.
 
 And that's regardless of the fact, that dispite the marking number the core system is the same between the two platforms. Yes, systemd, cgroups and a lot more have had serious upgrades but nothing that makes starting all over required. Fedora has proven that's not the case. And any RPM can include scripts that activate to customize/change configurations as part of an upgrade. We can make it up to each maintainer to ensure what they maintain safely upgrade between versions.
+
+### My first scream and more to follow
+Reading the guide was initially very confusing (until I asked to get it changed). The upgrade process seems to want to upgrade both hypervisors and the management system at the same time. In my case that's not required - I do not run a managed install where the management components is a VM on oVirt - in the past this was not reliable and I ended up with an architecture where I have options when things fail - RHVM44 is my management VM and it runs outside of oVirt completely indepent on the storage that oVirt depends on.
+
+So I tried to upgrade/change a oVirt Hypervisor node - this means downloading the 4.4 ISO and try to install using it. When you do that on an server with existing oVirt 4.3 on it, you end up with an installer that plain out refuses to have anything to do with the system and tells you "sorry, no automation available" (it calls it kickstart). So you cannot even upgrade without first wiping the existing hypervisor clean. So i screamed rather loudly. Not for the first time.
+
+It's worth mentioning that under the covers, the RHVNODE boxes all have 8 nics. I currently don't use ALL 8 - just 4 - but that will hopefully change. Getting them to work/configured with 4.3 was a challenge. It turns out (lesson learned) that you cannot use "teamd" but has to use the deprecated bond interface. So after struggling with an old switch that just didn't understand LACP (I realized once I read the datasheet more specifically) and once I realized I was counting the nic ID wrong so my pairs didn't match - I had a system that worked. UNTIL RHv 4.3 "installed" on them, and all my work was for not - it was cleared - worse, I had used bond for the management interface and that's a big no-no too. This was my second scream.
+
+Worse VDSM has "hidden" configuration files, so as I correct the nic sequence using NetworkManager it would at 'random times' reset it back to the non-working installation.  All of this frustrated network configuration is NOT backed up - when you wipe the hypervisor and start over, it's lost.  So is the Satellite registration, FreeIPA, certs, hostnames etc.  I'll touch more of this later on. But at this point, reading the guide knowing what it took to get the configuration right this made me decide not to upgrade until absolutely necessary.
+
+And when OpenShift 4.6 decided it no longer could use oVirt 4.3 it was absolutely necessary.
+
+## Upgrading - initial steps
+The process I wanted to follow was this:
+1. Upgrade RHVM to 4.4
+2. Upgrade RHVH to 4.4 - one at a time
+
+But since there is no upgrade process available, the steps I followed was:
+1. Install clean RHEL8.2 box
+2. Install RHVM 4.4 on this clean RHEL8.2
+3. On existing RHVM 4.3 perform "engine-backup" as laid out in the Red Hat provided documentation
+4. Copy backup to new RHEL8.2 box (now named rhvm44) and use engine-restore followed by engine-setup. 
+5. Shutdown all 3 RHVNODE boxes - prepare LOM mount of the installation ISO and do a 100% manual install
+6. Do post RHVH installation steps - register to FreeIPA and subscribe to Satellite
+7. Add RHVNODE to oVirt cluster and find a way to configure the node to match old configuration
+8. When all nodes are added to RHVM upgrade the oVirt cluster to 4.4 compatibilty
+9. Perform this for the remaining cluster too (same process but I cannot stop all VMs)
+10. Upgrade datacenter to 4.4 compatability
+
+As it's clear - nothing here is an upgrade. It's all reinstall from scratch.
+
+## Handling certificates
+Because all certificates are managed by certmonger and FreeIPA, you cannot just rename a host once registered to duplicate an old system. This meant I couldn't find a way to safely attempt a 4.4 upgrade without rendering the old 4.3 mananager non-functional as certs would be invalid. I would have to remove/delete the host from FreeIPA before creating another system with the same name.
+
+RHVM uses the same certificate for cockpit and for RHVM (httpd). None of these options are mentioned in the upgrade guide, and no certificates are moved into the new installation (from backup). I highly object to the name "backup" when it doesn't include all the features it claims to manage.
+
+## RHVM upgrade
+The first step was to get the manager upgraded, and because it's a separate VM outside of oVirt it actually did simplify things. Creating a new RHEL8.2 VM was easy, and it was registered with FreeIPA and Satellite, fully updated. Enabling the RHV 4.4 channels and dependency channels complete. Let's point out that this step isn't in the upgrade manual. There's a simple link to the main page of how to install RHEL8 - not how to provision and make it into a RHV 4.4 box. You need to read a couple of more manuals to understand the settings/options you have.  These are the channels I subscribed to:
+
+```bash
+# subscription-manager repos --list-enabled | grep "Repo Name"
+Repo Name: JBoss Enterprise Application Platform 7.3 (RHEL 8) (RPMs)
+Repo Name: Red Hat Enterprise Linux 8 for x86_64 - BaseOS (RPMs)
+Repo Name: Red Hat Enterprise Linux 8 for x86_64 - AppStream (RPMs)
+Repo Name: Red Hat Satellite Tools 6.7 for RHEL 8 x86_64 (RPMs)
+Repo Name: Red Hat Virtualization Manager 4.4 for RHEL 8 x86_64 (RPMs)
+Repo Name: Red Hat Virtualization 4 Tools for RHEL 8 x86_64 (RPMs)
+Repo Name: Fast Datapath for RHEL 8 x86_64 (RPMs)
+Repo Name: Red Hat Ansible Engine 2.9 for RHEL 8 x86_64 (RPMs)
+```
+
+At this point i used ipa-getcert to create a certificate for the node and provided this certificate to cockpit:
+
+```bash
+#!/bin/bash
+CERT_FILE=/etc/pki/tls/certs/$(hostname).pem
+KEY_FILE=/etc/pki/tls/private/$(hostname).key
+
+systemctl enable cockpit.socket
+
+ipa-getcert request -f ${CERT_FILE} -k ${KEY_FILE} -C "sed -n w/etc/cockpit/ws-certs.d/50-from-certmonger.cert ${CERT_FILE} ${KEY_FILE}"
+```
+
+For some reason the "post creation" command doesn't get executed, so I ran that by hand after the request.
+This certificate is also the one I use for httpd for RHVM - see later.
+
+To install all prequisites for RHVM 4.4:
+
+```bash
+yum module -y enable pki-deps postgresql:12 virt
+yum distro-sync
+dnf install rhvm
+```
+
+At this point, no firewalls or other requirements have been implemented. This does not happen until you run engine-seutp.
+
+Having copied the backup file from the current manager node (called rhv43.bck) I restored using the following command:
+
+```bash
+# engine-backup --mode=restore --scope=all --file=rhv43.bck --log=restore.log --provision-all-databases
+```
+
+Note the --provision-all-databases - without it a new database is not going to be created. Again, at this point firewalls and other features are not yet implemented. 
+
+Before running the next step, ensure the old rhvm 4.3 system is DOWN - this will start a manager which will reach out and start "messing" with the hypervisors. You don't want the old system to interfear. As a matter of fact, from the time you take the backup of RHVM 4.3 till this step, all changes in between will be lost - so stopping RHVM 4.3 right after the backup is a good idea. Remember, the VMs will continue to operator even without RHVM.
+
+By registered with FreeIPA NTP (chrony) gets configured too - at this point the host is supposed to have all required configuration files to initialize engines etc.  I wasn't too happy because I never found a good guide on putting Postgresql on a sepaate partion as part of this installation. The above engine-backup creates the DB without you having any choice to WHERE datafiles are placed. If I installed postgresql and initialized it myself, I would know what to change. Not in this case.
+
+```bash
+engine-setup
+```
+
+This runs the actual installation process for RHVM - it configures all components with the exception of:
+
+* server certificates
+* LDAP/IDM integration
+* Hostname change
+
+This means when RHVM comes up the first time, things aren't really working. And the upgrade guide isn't helpful - you're just guided to the main installation guide that doesn't work base on having an existing configuration you need to work from.
+
+### SSL
+Since the certificate was already generated earlier for cockpit, I ended up modifying /etc/httpd/conf.d/ssl.conf to include referneces to the two new certificates and the CA (just to be sure):
+
+```conf
+SSLCertificateFile /etc/pki/tls/certs/rhvm44.crt
+SSLCertificateKeyFile /etc/pki/tls/private/rhvm44.key
+SSLCACertificateFile /etc/ipa/ca.crt
+```
+
+Reloading httpd took care of the certificate.
+
+### LDAP/IDM
+This was a challenge, because at this point the last issue was unknown to me. This installation is integrated with the LDAP part of FreeIPA - although I suspect that's what the SSO part does for you. Because this integration was not included with the backup - you have a situation where part of the database has content that depends on this feature to be present - which users have access to what features in oVirt - but the external parts of the LDAP integration isn't there - you cannot login or authentication except as admin@internal. First, the extension must be installed:
+
+```bash
+yum install ovirt-engine-extension-aaa-ldap
+```
+
+This provides a /usr/share/ovirt-engine-extension-aaa-ldap/ directory and structure:
+
+![Treestructure](/assets/images/aaa-extension-tree.jpg)
+
+Insside the setup/bin directory is the executable to configure LDAP: ovirt-engine-extension-aaa-ldap-setup
+
+This will (re)prompt for your IPA settings. But a known bug will block you here:
+
+1. Select IPA as the integration
+2. Choose DNS SVR as the way to find the IPA servers
+3. Enter your domain (match the REALM of your IPA server - all lower case)
+4. Choose SYSTEM (not file, not URL etc) for the CA. If you choose File the process aborts with a known error that won't be fixed until 4.4.3 at the earliest.
+5. Enter the DN for the "search user" (the documentation doesn't state what privileges it must have - it is used to list all existing users based on a user criteria)
+6. Enter the password for the DN - let the code validate successfully it can login
+7. Enter the base DN for all searches - I always include cn=accounts,dc=<domain> - remember, FreeIPA adds "accounts" vs traditional DNs.
+
+This will write the correct files and continue. I actually had basic authentication working even after failing step #4 - but it wasn't reliable (due to issue 3).
+
+Bugs:
+* [bz#1879199](https://bugzilla.redhat.com/show_bug.cgi?id=1879199)
+* [bz$1846365](https://bugzilla.redhat.com/show_bug.cgi?id=1846365)
+
+### Renaming the hostname
+As the old database guy in me told me, changing the hostname was dangerous because the hostname may be part of other configuration options in and outside the database. And I was right.  A lot of features started to fail - authentication was just one of them.  
+
+[oVirt Engine Rename Tool](https://access.redhat.com/documentation/en-us/red_hat_virtualization/4.2/html/administration_guide/chap-utilities) contains a script to use renaming the hostname in the engine configuration.  Unfortunately it has a few issues - the primary one is bz#1846365 - this one is not yet available on RHV 4.4.2.
+
+```bash
+/usr/share/ovirt-engine/setup/bin/ovirt-engine-rename --newname=rhvm44.domain.name
+```
+
+To get around bz#1846365 manually edit /etc/ovirt-engine/engine.conf.d/10-setup-grafana-access.conf to reflect the correct hostname (it doesn't get renamed). Restart the ovirt-engine and you should now have an operational installation.
+
+### Left over issues
+The engine log still shows a lot of errors that so far has resisted every effort to reset the SSO key:
+
+```log
+2020-10-10 17:30:10,767-04 ERROR [org.ovirt.engine.core.sso.utils.SsoUtils] (default task-7) [] OAuthException invalid_grant: The provided authorization grant for the auth code has expired.
+```
+
+This is coming from OCP which is trying to get a machine status through the API, and the user it's attempting to login with succeeds but then ends up with this error. I've tried to recreate the SSO secret but no luck so far.
+
+## Hypervisor upgrades
+Every hypersor also has it's own certificate used for cockpit (no permanent endpoints should exist with self-signed certs). I would lose all the cert-monger features to maintain the certificates on the existing hypervisors in the process - I initially tried to not delete the host entry in FreeIPA but this caused issues - and with --force-join all service based certificates were removed and nothing was preserved anyway. So I had to remove the hypervisors not only from FreeIPA but Satellite too - trying to register a host where an existing set of facts exist for RHEL7 but your host is RHEL8 causes failures.  I'm sure it's a bug and bugzillas will be created - but in the end:
+
+1. Removed all infrastructure components for every hypervisor
+2. Removed DNS entries since DNSSEC signed existing entries
+
+I took notes on each RHVNODE's network configuration to get NIC ports right on the new install. Notes included IP addresses (3 in total per system), passwords and other features I needed. 
+
+Then I grabbed the SuperMicro LOM Java client (ohhh how it reminds me of 20 years ago) attached the ISO and forced a boot. 
+
+The overall process is as follows:
+
+1. Place node into maintenance mode - first migrate/stop VMs that may be on the node
+2. When the node is in maintenance mode, ssh to the node and dump all configuration important for install, like which nic is mapped to what network. Note IP addresses (I have 3 per node, 2 are owned by RHVH) MAC addresses (helps debugging DHCP issues and switch issues)
+3. Note at this point, RHVM 4.4 is reporting all the hypervisors as needing an upgrade. DO NOT RUN AN UPGRADE - things will fail, and placing the node in maintenance mode after this, is not easy.  Do not try to reinstall the oVirt configuration either. At this point, RHVM 4.4 is not capable of fixing/correcting/managing the 4.3 nodes. It can see what they are doing though.
+4. From the menu stop the node using SSH - once the node is confirmed down, DELETE the node from RHVM.
+5. Delete all entries for the node in Satellite and in FreeIPA
+6. Place the RHVH 4.4 installation ISO as a boot device. Note, it's been at least 5 years since I last owned a system with a CDROM drive in it - it's sorta like the LOM support for floppy devices - who uses this anymore? Anyway - I place the iso image on a USB stick using "dd" and in this case where the LOM allows me to specify an ISO file for remote mounting of ISOs I did that instead. Note - it's very very slow - but I didn't have an option as access to the USB ports in the back is blocked for me.
+7. Power-on the unit, and pick the "boot menu" feature.  At this point - if your hardware does not support UEFI it may not end well. This was the reason the installer fails when it sees RHVH 4.3 - it cannot validate the installation because RHVH 4.3 does not use UEFI - but all my hardware supports it, and it confuses the installer. It's almost like 'if you have the hardware, you must use it'.
+8. Optional: Enable UEFI setup mode if you have it turned off - again, I highly recommend you do this if it's disabled
+9. In the boot menu, pick the USB/CD device that shows up. You may have to add the USB port as a valid UEFI device for this to work.
+10. Boot the installer - for the first attempt with your downloaded image, verfiy the image. Otherwise go straight to the install
+11. When anaconda starts the GUI (yes, this requires a mouse and keyboard - good luck in the server room!) pick language (I cannot imagine anyone not choosing the default English - this is not a user-accessible system).
+12. In the installation menu you'll see several errors - the important is on the disk that says that the installer cannot apply the kickstart provided configuration (because it cannot find the EFI partition - or validate the one it thinks is EFI). Pick the disk, and pick "customize" before hitting OK
+13. In customize disk, manually remove every partition. Luckily the installer will ask if you want to remove everything "labeled/grouped" the same way, or just the component you pick. So on my system I had to pick delete 3 times (unknown, and two RHVH 4.3 setups). Once everything is black I picked the 'automatically create partitions" and accept the changes. At this point, you've deleted everything that was on this system - FOREVER.  DO NOT DO THIS IF YOU USE LOCAL STORAGE!!
+14. Choose keyboard language (not sure why this is required since you picked language earlier).
+15. Under network - provide the FQDN of the system as it was before
+16. Select the NIC where the management network attaches to (again, I cannot get bond to work for that so it's a single nic on my systems) and configure the NIC with a static IP address providing the IP address the management inferface had tbefore, the gateway, IP mask, DNS servers etc. 
+17. Be sure to mark the nic as starting automatically on boot - and then click OK
+18. Start the installation
+19. Enter a root password (I know - crazy but it's only temporary)
+
+This process takes me about 10-15 minutes per box. When doing the remote ISO boot it takes a LOT longer - but it cannot be automated. At least I haven't found a way to do it. If you choose to wipe the disk from an emergency boot/console you still have to use the nodectl installer to provide a basic NIC etc. 
+
+You have to repeat this step for every hypervisor you have. It's very manual prune and you should spend quite a bit of time validating that everything is correctly configured.
+
+When the installation completes, reboot the system (remove the ISO mount/USB so it doesn't boot on it again). This will result in a system that should be accessible over the network. However, you may find something went wrong so logging into via the console will be the only way to diagnose and fix issues. Remote LOM consoles are great for this. Once possible, SSH to the system as root (alarm bells are running, I know).
+
+With a validated login, ssh-copy-id your SSH key for the RHVH machines to root, and modify /etc/ssh/sshd_config to only allow root logins using certificates. I find nothing about these basic steps in the documentation - it's a common sense natural process for me.  If you're lucky, the management interface isn't exposed outside a "hypervisor DMZ" but you should still block all password authentication.
+
+This is where IPA really helps. The next step is to run ipa-client-install:
+
+```
+# ipa-client-install --mkhomedir --force-join
+```
+  If you deleted the host completely from FreeIPA  you do not need the --force-join. But since every certificate is lost anyway, it's not much of a change. I did have to re-add the nodes into the right host-groups and net groups because I deleted the host. You may be able to avoid that.
+
+  This will also prompt you to enter NTP parameters (required for good cluster diagnostics) and you'll need a user/password on the IPA side to add the host from the command line. 
+
+  Next step is to add the host to Satellite:
+
+  ```bash
+# yum install http://satellite.domain.name/pub/katello-ca-consumer-latest.noarch.rpm
+# subscription-manager register --activationkey=<virtnodekey> --org=<orgname>
+# subscription-manager repos --enable=*
+  ```
+  Be sure to use existing virtnodekey and orgname.  The activation key must be associated with a content view that has the RHVH 4.4 repository. I also include Satellite client but it's never available so you cannot install katello-agent unless you cheat and do it manually. 
+
+Do a "yum update -y" to ensure everything is configured correctly. 
+
+I really wish there was a way to PXE boot the ISO from Satellite. It would allow full automation up to this point. If you know of one, please let me know!
+
+At this point, the RHVH system isn't joined to RHVM - to do that, login to RHVM as a cluster-admin and under Compute->Hosts add the node - I have Satellite as provider, so I pick the existing node from Satellite, "shorten" the oVirt name for the host to not include FQDN, deselect "activate after creation" since activation without network configuration will fail, and then I add Power management using IPMILAN - this is where you need to know the second IP address (or hostname - as in my case this is a TLS protected end point) and authentication needed. 
+
+Be sure to select the correct cluster btw. - although once the system is in maintenance mode you can change it. I had one try to activate in the wrong cluster and well, it wasn't pretty (wrong CPU types etc).
+
+I don't use Affinity groups - this is one of the changes between 4.3 and 4.4 so you may need to configure these aspects too - remember what they were in your old setup - this isn't migrated!
+
+Provide the root SSH key for authentication (or if you didn't prevent password authentication just enter the root password) and let the activation begin. The installation takes 5-10 minutes - I typically have an SSH session going on the RHVH node to keep track of what's going on. If you used bond or other "funny" tricks this is where you'll see your connection being severed and killed, and you have to start over - more or less (if you're good at VDSM you can probably recover with reinstalling).
+
+Once the installation completes, the node should be in maintainance mode. Now, there is a "copy network configuration" option where you can specify an existing node and your new node as a destination - I have NO clue if it does anything - because I see no difference in regards to this last step.
+
+This is where I was thrilled about 4.4 - at least I hadn't seen this with 4.3. Open the node details and pick network. Then pick "Setup Host Networks". Because I have a bonded interface for VMs and another for Storage backends, I need to create the bonds. Do not do what I did in the past - using NetworkManager and teamd to create a bond easily. It is absolutely screwed up or makes configurating networks fail at this point.  Instead, I found this simple thing working:
+
+Drag-and-drop one of the bonded nics onto the other. It prompts you for the name of the bond and the type of bond - pick accordingly to your switch configuration, and PRESTO VDSM will setup the bond for you. You only need to drag the existing network definition onto the bond(s).
+
+My storage network is in a VLAN - and it requires an IP to work. The drag/drop will not be enough - it does remember the VLAN but you need to hit edit of the storage network after you drag it to the bond, and then pick "static IP" and enter the last IP address for storage. Once you click OK you'll see the bonds being created (but not active).  You'll see if this works when you activate the node.
+
+Activate node - this brings up the network and storage will be mounted. In my case, unless the VLAN is working the storage mounts will fail and bring the activation into a dead-loop where it will try again and again until giving up after a long time of errors.
+
+At this point - you have at least one node in the cluster.  It should be operational. Once you have all the nodes added to a cluster, you can edit the cluster's compatibility mode to 4.4.  If you  have any templates in this cluster (and who doesn't) you will run into issues. I don't know how to solve it, as changing the compatibility mode in the templates doesn't remove the error. In my case I deleted the templates to make this step work. 
+
+With all clusters upgraded, you can change the data-center's compatibility mode and avoid all the crazy errors/warnings about OVF_STORE not working or being configured wrong (according to 4.4). You can definitely ignore it as the cluster seems to be operational. 
+
+# Conclusion
+I don't see much of a difference between a clean new installation and then this. Since you can migrate existing storage domains to a new cluster, it feels as the process followed here was only slightly faster than a clean new installation.  I had to stop most VMs except for the absolute most vital ones from an infrastructure perspective to make the "migration" successful. 
+
+My time spent so far is a couple of days. First on trying to plan out the right approach - attempting to clone RHVM 4.3 and then doing a RHEL8 upgrade on this box followed by an engine-setup upgrade - but that wasn't supported and didn't end well either. This process is what I finally made work - it's very intensive and luckily I only have 5 RHVH nodes (hypervisors). If you have more - your time and risk will be accordingly. Since every step is a manual reconfiguration.
+
+I love oVirt - it's been a stable for professional work for 7 years, and before that libvirt has been my go-to for every need I have with virtualization. It's fast, simple and extremely flexible. So while this dinged my "happy feeling" in regards to oVirt it's not enough to not make it continue. But I cannot help thinking that as a product RHV has come to an end. I don't know for sure - but this upgrade process, it's hard cut off of the "old" 4.3 systems all speaks the same language. Existing users will probably look elsewhere once faced with this process. There must be something simpler. To me, it's pure libvirtd and "virt-manager". I use it to manage remote systems - it works great!  It doesn't do live migration, and some of the GPU features aren't there, but I can customize those features. 
+
+So perhaps that's where I'll end - just going straight libvirtd and forget about rhvm. But it will make easy API end points HARD since there's no federations for libvird. 
