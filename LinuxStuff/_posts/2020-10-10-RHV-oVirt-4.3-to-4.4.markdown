@@ -193,7 +193,7 @@ This will write the correct files and continue. I actually had basic authenticat
 
 Bugs:
 * [bz#1879199](https://bugzilla.redhat.com/show_bug.cgi?id=1879199)
-* [bz$1846365](https://bugzilla.redhat.com/show_bug.cgi?id=1846365)
+* [bz#1846365](https://bugzilla.redhat.com/show_bug.cgi?id=1846365)
 
 ### Renaming the hostname
 As the old database guy in me told me, changing the hostname was dangerous because the hostname may be part of other configuration options in and outside the database. And I was right.  A lot of features started to fail - authentication was just one of them.  
@@ -251,7 +251,7 @@ This process takes me about 10-15 minutes per box. When doing the remote ISO boo
 
 You have to repeat this step for every hypervisor you have. It's very manual prune and you should spend quite a bit of time validating that everything is correctly configured.
 
-When the installation completes, reboot the system (remove the ISO mount/USB so it doesn't boot on it again). This will result in a system that should be accessible over the network. However, you may find something went wrong so logging into via the console will be the only way to diagnose and fix issues. Remote LOM consoles are great for this. Once possible, SSH to the system as root (alarm bells are running, I know).
+When the installation completes, reboot the system (remove the ISO mount/USB so it doesn't boot on it again). This will result in a system that should be accessible over the network. However, you may find something went wrong so logging into via the console will be the only way to diagnose and fix issues. Remote LOM consoles are great for this. Once possible, SSH to the system as root (alarm bells are ringing, I know).
 
 With a validated login, ssh-copy-id your SSH key for the RHVH machines to root, and modify /etc/ssh/sshd_config to only allow root logins using certificates. I find nothing about these basic steps in the documentation - it's a common sense natural process for me.  If you're lucky, the management interface isn't exposed outside a "hypervisor DMZ" but you should still block all password authentication.
 
@@ -279,7 +279,7 @@ I really wish there was a way to PXE boot the ISO from Satellite. It would allow
 
 At this point, the RHVH system isn't joined to RHVM - to do that, login to RHVM as a cluster-admin and under Compute->Hosts add the node - I have Satellite as provider, so I pick the existing node from Satellite, "shorten" the oVirt name for the host to not include FQDN, deselect "activate after creation" since activation without network configuration will fail, and then I add Power management using IPMILAN - this is where you need to know the second IP address (or hostname - as in my case this is a TLS protected end point) and authentication needed. 
 
-Be sure to select the correct cluster btw. - although once the system is in maintenance mode you can change it. I had one try to activate in the wrong cluster and well, it wasn't pretty (wrong CPU types etc).
+Be sure to select the correct cluster btw. - although once the system is in maintenance mode you can change it. I had one attempt activating on the wrong cluster and well, it wasn't pretty (wrong CPU types etc).
 
 I don't use Affinity groups - this is one of the changes between 4.3 and 4.4 so you may need to configure these aspects too - remember what they were in your old setup - this isn't migrated!
 
